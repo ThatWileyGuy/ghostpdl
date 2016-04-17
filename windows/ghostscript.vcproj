@@ -5794,6 +5794,10 @@
 				>
 			</File>
 			<File
+				RelativePath="..\devices\gdevlq510.c"
+				>
+			</File>
+			<File
 				RelativePath="..\devices\gdevlxm.c"
 				>
 			</File>
