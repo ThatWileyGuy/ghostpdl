@@ -525,6 +525,18 @@ $(DD)lq850.dev : $(dm24_) $(DD)page.dev $(DCONTRIB_MAK) $(MAKEDIRS)
 
 $(DEVOBJ)gdevdm24.$(OBJ) : $(DEVSRC)gdevdm24.c $(PDEVH) $(DCONTRIB_MAK) $(MAKEDIRS)
 	$(DEVCC) $(DEVO_)gdevdm24.$(OBJ) $(C_) $(DEVSRC)gdevdm24.c
+	
+### -------- Epson LQ-510 24pin Dot-matrix printer with 360DPI --------- ###
+### Note: this driver was contributed by users.  Please contact:         ###
+###    Andrew Wiley (wiley@outlook.com) for                              ###
+###      questions about the Epson LQ-510;                               ###
+
+lq510_=$(DEVOBJ)gdevlq510.$(OBJ)
+$(DD)lq510.dev : $(lq510_) $(DD)page.dev $(CONTRIB_MAK) $(MAKEDIRS)
+	$(SETPDEV) $(DD)lq510 $(lq510_)
+
+$(DEVOBJ)gdevlq510.$(OBJ) : $(DEVSRC)gdevlq510.c $(PDEVH) $(CONTRIB_MAK) $(MAKEDIRS)
+	$(DEVCC) $(DEVO_)gdevlq510.$(OBJ) $(C_) $(DEVSRC)gdevlq510.c
 
 ### ----------------- Lexmark 5700 printer ----------------------------- ###
 ### Note: this driver was contributed by users.  Please contact:         ###
