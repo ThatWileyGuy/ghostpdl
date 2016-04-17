@@ -32,9 +32,9 @@ prn_device(prn_bg_procs, "lq510",	/* The print_page proc is compatible with allo
 /* Forward references */
 static void dot24_output_run(byte *, int, int, FILE *);
 static void dot24_filter_bitmap(byte *data, byte *out, int count, int pass);
-static void dot24_print_line(byte *out, byte *out_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_line_backwards(byte *out, byte *out_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_block(int pos, byte *blk_start, byte *blk_end, int x_high, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, int x_high, int bytes_per_pos, FILE *prn_stream);
 
 /* Send the page to the printer. */
 static int
@@ -50,6 +50,7 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     byte *in = (byte *)gs_malloc(pdev->memory, in_size, 1, "dot24_print_page (in)");
     uint out_size = in_size;
     byte *out = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out)");
+    byte *out_temp = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out_temp)");
     int dots_per_pos = xres / 60;
     int bytes_per_pos = dots_per_pos * 3;
     int skip = 0, lnum = 0;
@@ -58,6 +59,8 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     /* Check allocations */
     if (in == 0 || out == 0)
     {
+        if (out_temp)
+            gs_free(pdev->memory, (char *)out_temp, out_size, 1, "dot24_print_page (out_temp)");
         if (out)
             gs_free(pdev->memory, (char *)out, out_size, 1, "dot24_print_page (out)");
         if (in)
@@ -151,11 +154,11 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
 
         if (forward)
         {
-            dot24_print_line(out, out_end, x_high, y_high, xres, bytes_per_pos, prn_stream);
+            dot24_print_line(out_temp, out, out_end, x_high, y_high, xres, bytes_per_pos, prn_stream);
         }
         else
         {
-            dot24_print_line_backwards(out, out_end, x_high, y_high, xres, bytes_per_pos, prn_stream);
+            dot24_print_line_backwards(out_temp, out, out_end, x_high, y_high, xres, bytes_per_pos, prn_stream);
         }
 
         forward = !forward;
@@ -168,13 +171,14 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     fputs("\f\033@", prn_stream);
     fflush(prn_stream);
 
+    gs_free(pdev->memory, (char *)out_temp, out_size, 1, "dot24_print_page (out_temp)");
     gs_free(pdev->memory, (char *)out, out_size, 1, "dot24_print_page (out)");
     gs_free(pdev->memory, (char *)in, in_size, 1, "dot24_print_page (in)");
 
     return 0;
 }
 
-void dot24_print_line(byte *in_start, byte *in_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -233,13 +237,13 @@ void dot24_print_line(byte *in_start, byte *in_end, int x_high, int y_high, int 
             blk_end = in_end;
         }
 
-        dot24_print_block((blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
+        dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
 
         in_start = blk_end;
     }
 }
 
-void dot24_print_line_backwards(byte *in_start, byte *in_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -313,19 +317,18 @@ void dot24_print_line_backwards(byte *in_start, byte *in_end, int x_high, int y_
             blk_start = in_start;
         }
 
-        dot24_print_block((blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
+        dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
 
         in_end = blk_start;
     }
 }
 
-void dot24_print_block(int pos, byte *blk_start, byte *blk_end, int x_high, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, int x_high, int bytes_per_pos, FILE *prn_stream)
 {
     int passes = x_high ? 2 : 1;
     const byte *orig_blk_start = blk_start;
     byte *seg_start;
     byte *seg_end;
-    byte output[blk_end - blk_start];
     int seg_pos;
 
     for (int pass = 0; pass < passes; pass++)
@@ -383,11 +386,11 @@ void dot24_print_block(int pos, byte *blk_start, byte *blk_end, int x_high, int 
 
             if (x_high)
             {
-                dot24_filter_bitmap(seg_start, output, seg_end - seg_start, pass);
+                dot24_filter_bitmap(seg_start, out_temp, seg_end - seg_start, pass);
             }
             else
             {
-                memcpy(output, seg_start, seg_end - seg_start);
+                memcpy(out_temp, seg_start, seg_end - seg_start);
             }
 
             // go to the start of the segment
@@ -395,7 +398,7 @@ void dot24_print_block(int pos, byte *blk_start, byte *blk_end, int x_high, int 
             fprintf(prn_stream, "\033$%c%c", seg_pos % 256, seg_pos / 256);
 
             // print
-            dot24_output_run(output, seg_end - seg_start, x_high, prn_stream);
+            dot24_output_run(out_temp, seg_end - seg_start, x_high, prn_stream);
 
             blk_start = seg_end;
         }

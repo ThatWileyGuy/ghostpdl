@@ -1865,7 +1865,7 @@ DEVICE_DEVS16=$(DEVICE_DEVS16) $(DD)ocr.dev $(DD)hocr.dev $(DD)pdfocr8.dev $(DD)
 # Overflow for DEVS3,4,5,6,9
 DEVICE_DEVS17=$(DD)ljet3.dev $(DD)ljet3d.dev $(DD)ljet4pjl.dev $(DD)ljet4.dev $(DD)ljet4d.dev $(DD)lp2563.dev $(DD)paintjet.dev $(DD)pjetxl.dev $(DD)lj3100sw.dev $(DD)oce9050.dev $(DD)r4081.dev $(DD)sj48.dev
 DEVICE_DEVS18=$(DD)pj.dev $(DD)pjxl.dev $(DD)pjxl300.dev $(DD)jetp3852.dev $(DD)r4081.dev
-DEVICE_DEVS19=$(DD)lbp8.dev $(DD)m8510.dev $(DD)necp6.dev $(DD)bjc600.dev $(DD)bjc800.dev
+DEVICE_DEVS19=$(DD)lbp8.dev $(DD)m8510.dev $(DD)lq510.dev $(DD)necp6.dev $(DD)bjc600.dev $(DD)bjc800.dev
 DEVICE_DEVS20=$(DD)pnm.dev $(DD)pnmraw.dev $(DD)ppm.dev $(DD)ppmraw.dev $(DD)pamcmyk32.dev $(DD)pamcmyk4.dev $(DD)pnmcmyk.dev $(DD)pam.dev
 DEVICE_DEVS21=$(DD)spotcmyk.dev $(DD)devicen.dev $(DD)bmpsep1.dev $(DD)bmpsep8.dev $(DD)bmp16m.dev $(DD)bmp32b.dev $(DD)psdcmyk.dev $(DD)psdrgb.dev $(DD)psdcmyk16.dev $(DD)psdrgb16.dev $(DD)psdcmyktags.dev $(DD)psdcmyktags16.dev
 !endif
