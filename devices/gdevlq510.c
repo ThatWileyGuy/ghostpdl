@@ -19,6 +19,7 @@
 
 /* Driver for Epson LQ510 */
 static dev_proc_print_page(lq510_print_page);
+
 const gx_device_printer gs_lq510_device =
 prn_device(prn_bg_procs, "lq510",	/* The print_page proc is compatible with allowing bg printing */
     DEFAULT_WIDTH_10THS, DEFAULT_HEIGHT_10THS,
@@ -32,28 +33,28 @@ prn_device(prn_bg_procs, "lq510",	/* The print_page proc is compatible with allo
 /* Forward references */
 static void dot24_output_run(byte *, int, int, FILE *);
 static void dot24_filter_bitmap(byte *data, byte *out, int count, int pass);
-static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, int x_high, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream);
+static void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream);
 
 /* Send the page to the printer. */
 static int
 dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, int init_len)
 {
-    int xres = (int)pdev->x_pixels_per_inch;
-    int yres = (int)pdev->y_pixels_per_inch;
-    int x_high = (xres == 360);
-    int y_high = (yres == 360);
-    int bits_per_column = (y_high ? 48 : 24);
-    uint line_size = gdev_prn_raster(pdev);
-    uint in_size = line_size * bits_per_column;
-    byte *in = (byte *)gs_malloc(pdev->memory, in_size, 1, "dot24_print_page (in)");
-    uint out_size = in_size;
-    byte *out = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out)");
-    byte *out_temp = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out_temp)");
-    int dots_per_pos = xres / 60;
-    int bytes_per_pos = dots_per_pos * 3;
-    int skip = 0, lnum = 0;
+    const int xres = (int)pdev->x_pixels_per_inch;
+    const int yres = (int)pdev->y_pixels_per_inch;
+    const bool x_high = (xres == 360);
+    const bool y_high = (yres == 360);
+    const uint line_size = gdev_prn_raster(pdev);
+    const uint in_size = line_size * 24 * (y_high ? 2 : 1);
+    const byte *in = (byte *)gs_malloc(pdev->memory, in_size, 1, "dot24_print_page (in)");
+    const uint out_size = line_size * 24;
+    const byte *out = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out)");
+    const byte *out_temp = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out_temp)");
+    const int dots_per_pos = xres / 60;
+    const int bytes_per_pos = dots_per_pos * 3;
+    int lnum = 0, printer_lnum = 0;
     bool forward = true;
 
     /* Check allocations */
@@ -73,6 +74,39 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     fputc((int)(pdev->width / pdev->x_pixels_per_inch * 10) + 2,
         prn_stream);
 
+    if (y_high)
+    {
+        // For our 360dpi-vertical printing strategy to work, the first 12 printhead lines
+        // must always be 0 in the first pass. We'll print the lower 12 printhead
+        // lines, though.
+        // Here's how the strategy works in terms of rendered lines:
+        // Post-seek case:
+        //     - 0-22 (evens) - empty
+        //     - 1-23 (odds) - printed last time or empty
+        //     - 24-47 (evens) - printing
+        //     - 24-47 (odds) - printed next time
+        // Normal case:
+        //     - 0-22 (evens) - printing
+        //     - 1-23 (odds) - printed last time
+        //     - 24-46 (evens) - printing
+        //     - 25-47 (odds) - will print next time
+        //
+        // The benefit of this scheme is that for any block of 48 lines, the
+        // upper 12 even lines will be printed using the top of the printhead,
+        // the upper 12 odd lines were already printed using the bottom of the
+        // printhead, the lower 12 even lines will be printed using the bottom
+        // of the printhead, and the lower 12 odd lines will be printed in the
+        // next pass using the top of the printhead.
+        // This means that rendered lines alternate between printing on the top
+        // or bottom half of the printhead, which should make them appear very
+        // uniform.
+        //
+        // In practice, this makes seeking tricky, but in the normal case we
+        // simply advance 25 rendered lines every time.
+
+        lnum = -24;
+    }
+
     /* Print lines of graphics */
     while (lnum < pdev->height)
     {
@@ -83,52 +117,34 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
 
         memset(in, 0, in_size);
 
-        /* Copy 1 scan line and test for all zero. */
-        gdev_prn_copy_scan_lines(pdev, lnum, in, line_size);
-        if (in[0] == 0
-            && !memcmp((char *)in, (char *)in + 1, line_size - 1))
-        {
-            lnum += y_high ? 2 : 1;
-            skip += y_high ? 2 : 1;
-            continue;
-        }
-
-        /* Vertical tab to the appropriate position. */
-        while ((skip >> 1) > 255)
-        {
-            fputs("\x1bJ\xff", prn_stream);
-            skip -= 255 * 2;
-        }
-
-        if (skip)
-        {
-            if (skip >> 1)
-                fprintf(prn_stream, "\033J%c", skip >> 1);
-            if (skip & 1)
-                fputc('\n', prn_stream);
-        }
-
-        /* Copy the rest of the scan lines. */
+        // Copy a full block of scan lines
         if (y_high)
         {
-            inp = in + line_size;
-            for (lcnt = 1; lcnt < 24; lcnt++, inp += line_size)
-                if (!gdev_prn_copy_scan_lines(pdev, lnum + lcnt * 2, inp,
-                    line_size))
-                {
-                    memset(inp, 0, (24 - lcnt) * line_size);
-                    break;
-                }
-            inp = in + line_size * 24;
+            inp = in;
+            // Even lines first
             for (lcnt = 0; lcnt < 24; lcnt++, inp += line_size)
-                if (!gdev_prn_copy_scan_lines(pdev, lnum + lcnt * 2 + 1, inp,
-                    line_size))
+            {
+                const int line = lnum + lcnt * 2;
+                if (line < 0 || !gdev_prn_copy_scan_lines(pdev, line, inp, line_size))
                 {
-                    memset(inp, 0, (24 - lcnt) * line_size);
-                    break;
+                    memset(inp, 0, line_size);
                 }
+            }
 
-            assert(inp <= in + in_size);
+            // Odd lines go to the end of the buffer. We aren't going to print
+            // them now, but we need them if we decide to seek.
+            assert(inp == in + line_size * 24);
+
+            for (lcnt = 0; lcnt < 24; lcnt++, inp += line_size)
+            {
+                const int line = lnum + lcnt * 2 + 1;
+                if (line < 0 || !gdev_prn_copy_scan_lines(pdev, line, inp, line_size))
+                {
+                    memset(inp, 0, line_size);
+                }
+            }
+
+            assert(inp == in + in_size);
         }
         else
         {
@@ -137,6 +153,76 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
             if (lcnt < 24)
                 /* Pad with lines of zeros. */
                 memset(in + lcnt * line_size, 0, in_size - lcnt * line_size);
+        }
+
+        // Seek if the block starts with empty lines
+        if (in[0] == 0 && !memcmp((char *)in, (char *)in + 1, line_size - 1))
+        {
+            int skip = 0;
+            skip = 1;
+            while (skip < 24 && !memcmp((char*)in, (char*)in + line_size * skip, line_size))
+            {
+                skip++;
+            }
+
+            if (!y_high)
+            {
+                lnum += skip;
+                continue;
+            }
+            else if (skip >= 12)
+            {
+                // in 360dpi mode, we can only seek if all 12 upper printhead
+                // lines are empty
+
+                // check the lower even and odd lines until we find one that's non-zero
+                int high_skip = 0;
+                for (high_skip = 0; high_skip < 24; high_skip++)
+                {
+                    // we put the odd lines in the bottom half of the input buffer, so we need some
+                    // contortions to iterate through them here
+                    const char* target_line = in + (line_size * (12 + (high_skip / 2) + (high_skip % 2 == 0 ? 0 : 24)));
+                    if (memcmp((char*)in, target_line, line_size))
+                    {
+                        break;
+                    }
+                }
+
+                if(high_skip != 0)
+                {
+                    lnum += high_skip;
+                    continue;
+                }
+            }
+        }
+
+        if (lnum < 0)
+        {
+            // We can't actually put the printhead at a negative position.
+            // Instead, fiddle the buffers so it looks like it is.
+            const int shift =  -1 * ((lnum - 1) / 2);
+
+            assert(printer_lnum == 0);
+            assert(y_high);
+            assert(shift >= 0);
+
+            for (int real_line = 0; real_line < 24; real_line++)
+            {
+                const int remapped_line = real_line + shift;
+                if(remapped_line < 24)
+                {
+                    memcpy(in + real_line * line_size, in + remapped_line * line_size, line_size);
+                }
+                else
+                {
+                    memset(in + real_line * line_size, 0, line_size);
+                }
+            }
+        }
+        else if (printer_lnum != lnum)
+        {
+            dot24_skip_lines(lnum - printer_lnum, y_high, prn_stream);
+            printer_lnum = lnum;
         }
 
         out_end = out;
@@ -163,8 +249,7 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
 
         forward = !forward;
 
-        skip = 48;
-        lnum += bits_per_column;
+        lnum += y_high ? 25 : 24;
     }
 
     /* Eject the page and reinitialize the printer */
@@ -178,7 +263,32 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     return 0;
 }
 
-void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream)
+{
+    if (!y_high)
+    {
+        // printer is always initialized such that \n corresponds to a 1/360 inch
+        // page feed
+        lines *= 2;
+    }
+
+    /* Vertical tab to the appropriate position. */
+    while ((lines >> 1) > 255)
+    {
+        fputs("\x1bJ\xff", prn_stream);
+        lines -= 255 * 2;
+    }
+
+    if (lines)
+    {
+        if (lines >> 1)
+            fprintf(prn_stream, "\x1bJ%c", lines >> 1);
+        if (lines & 1)
+            fputc('\n', prn_stream);
+    }
+}
+
+void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -237,13 +347,15 @@ void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, int x_high, 
             blk_end = in_end;
         }
 
+        assert((blk_start - orig_in) % bytes_per_pos == 0);
+
         dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
 
         in_start = blk_end;
     }
 }
 
-void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, int x_high, int y_high, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -294,6 +406,8 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, i
             blk_start -= bytes_per_pos;
         }
 
+        assert((blk_start - orig_in) % bytes_per_pos == 0);
+
         /* Seek until we find a zero gap that's at least (xres * 3) / 2 (0.5 inch) */
         for (; blk_start >= in_start; blk_start -= bytes_per_pos)
         {
@@ -317,13 +431,15 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, i
             blk_start = in_start;
         }
 
+        assert((blk_start - orig_in) % bytes_per_pos == 0);
+
         dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
 
         in_end = blk_start;
     }
 }
 
-void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, int x_high, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream)
 {
     int passes = x_high ? 2 : 1;
     const byte *orig_blk_start = blk_start;
@@ -409,7 +525,7 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
 
 /* Output a single graphics command. */
 static void
-dot24_output_run(byte *data, int count, int x_high, FILE *prn_stream)
+dot24_output_run(byte *data, int count, bool x_high, FILE *prn_stream)
 {
     int xcount;
 
