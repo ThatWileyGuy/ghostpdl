@@ -19,14 +19,26 @@
 
 /* Driver for Epson LQ510 */
 static dev_proc_print_page(lq510_print_page);
+static dev_proc_get_params(lq510_get_params);
+static dev_proc_put_params(lq510_put_params);
 
-const gx_device_printer gs_lq510_device =
-prn_device(prn_bg_procs, "lq510",	/* The print_page proc is compatible with allowing bg printing */
+typedef struct _gx_device_printer_lq510 {
+    gx_device_common;
+    gx_prn_device_common;
+    bool bidirectional;
+} gx_device_printer_lq510;
+
+const gx_device_procs prn_lq510_procs = prn_params_procs(gdev_prn_open, gdev_prn_bg_output_page, gdev_prn_close, lq510_get_params, lq510_put_params);
+
+gx_device_printer_lq510 gs_lq510_device =
+{
+    prn_device_std_body(gx_device_printer_lq510, prn_lq510_procs, "lq510",
     DEFAULT_WIDTH_10THS, DEFAULT_HEIGHT_10THS,
     360, 360,
-    //              0, 0, 0.5, 0,	/* margins */
     0.25, 0.02, 0.25, 0.4,	/* margins */
-    1, lq510_print_page);
+    1, lq510_print_page),
+    false
+};
 
 /* ------ Internal routines ------ */
 
@@ -40,7 +52,7 @@ static void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream);
 
 /* Send the page to the printer. */
 static int
-dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, int init_len)
+dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, int init_len, bool bidirectional)
 {
     const int xres = (int)pdev->x_pixels_per_inch;
     const int yres = (int)pdev->y_pixels_per_inch;
@@ -48,10 +60,10 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     const bool y_high = (yres == 360);
     const uint line_size = gdev_prn_raster(pdev);
     const uint in_size = line_size * 24 * (y_high ? 2 : 1);
-    const byte *in = (byte *)gs_malloc(pdev->memory, in_size, 1, "dot24_print_page (in)");
+    byte * const in = (byte *)gs_malloc(pdev->memory, in_size, 1, "dot24_print_page (in)");
     const uint out_size = line_size * 24;
-    const byte *out = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out)");
-    const byte *out_temp = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out_temp)");
+    byte * const out = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out)");
+    byte * const out_temp = (byte *)gs_malloc(pdev->memory, out_size, 1, "dot24_print_page (out_temp)");
     const int dots_per_pos = xres / 60;
     const int bytes_per_pos = dots_per_pos * 3;
     int lnum = 0, printer_lnum = 0;
@@ -143,16 +155,15 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
                     memset(inp, 0, line_size);
                 }
             }
-
             assert(inp == in + in_size);
         }
         else
         {
-            lcnt = 1 + gdev_prn_copy_scan_lines(pdev, lnum + 1, in + line_size,
-                in_size - line_size);
+            lcnt = gdev_prn_copy_scan_lines(pdev, lnum, in, line_size * 24);
             if (lcnt < 24)
-                /* Pad with lines of zeros. */
-                memset(in + lcnt * line_size, 0, in_size - lcnt * line_size);
+            {
+                memset(in + lcnt * line_size, 0, (24 - lcnt) * line_size);
+            }
         }
 
         // Seek if the block starts with empty lines
@@ -181,14 +192,14 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
                 {
                     // we put the odd lines in the bottom half of the input buffer, so we need some
                     // contortions to iterate through them here
-                    const char* target_line = in + (line_size * (12 + (high_skip / 2) + (high_skip % 2 == 0 ? 0 : 24)));
+                    const char* target_line = (const char*)(in + (line_size * (12 + (high_skip / 2) + (high_skip % 2 == 0 ? 0 : 24))));
                     if (memcmp((char*)in, target_line, line_size))
                     {
                         break;
                     }
                 }
 
-                if(high_skip != 0)
+                if (high_skip != 0)
                 {
                     lnum += high_skip;
                     continue;
@@ -200,7 +211,7 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         {
             // We can't actually put the printhead at a negative position.
             // Instead, fiddle the buffers so it looks like it is.
-            const int shift =  -1 * ((lnum - 1) / 2);
+            const int shift = -1 * ((lnum - 1) / 2);
 
             assert(printer_lnum == 0);
             assert(y_high);
@@ -209,7 +220,7 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
             for (int real_line = 0; real_line < 24; real_line++)
             {
                 const int remapped_line = real_line + shift;
-                if(remapped_line < 24)
+                if (remapped_line < 24)
                 {
                     memcpy(in + real_line * line_size, in + remapped_line * line_size, line_size);
                 }
@@ -221,6 +232,8 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         }
         else if (printer_lnum != lnum)
         {
+            assert(printer_lnum < lnum);
+
             dot24_skip_lines(lnum - printer_lnum, y_high, prn_stream);
             printer_lnum = lnum;
         }
@@ -247,7 +260,10 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
             dot24_print_line_backwards(out_temp, out, out_end, x_high, y_high, xres, bytes_per_pos, prn_stream);
         }
 
-        forward = !forward;
+        if (bidirectional)
+        {
+            forward = !forward;
+        }
 
         lnum += y_high ? 25 : 24;
     }
@@ -442,7 +458,7 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, b
 void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream)
 {
     int passes = x_high ? 2 : 1;
-    const byte *orig_blk_start = blk_start;
+    byte * const orig_blk_start = blk_start;
     byte *seg_start;
     byte *seg_end;
     int seg_pos;
@@ -571,7 +587,60 @@ dot24_filter_bitmap(byte *data, byte *out, int count, int pass)
 static int
 lq510_print_page(gx_device_printer *pdev, FILE *prn_stream)
 {
+    bool bidirectional = ((gx_device_printer_lq510*)pdev)->bidirectional;
     char lq510_init_string[] = "\033@\033P\033l\000\r\033\053\001\033U\000\033Q";
 
-    return dot24_print_page(pdev, prn_stream, lq510_init_string, sizeof(lq510_init_string));
+    assert(pdev->params_size == sizeof(gx_device_printer_lq510));
+    assert(lq510_init_string[12] == 'U');
+    lq510_init_string[13] = bidirectional ? 0 : 1; // flag is actually for unidirectional
+
+    return dot24_print_page(pdev, prn_stream, lq510_init_string, sizeof(lq510_init_string), bidirectional);
+}
+
+static int
+lq510_get_params(gx_device *pdev, gs_param_list *plist)
+{
+    gx_device_printer_lq510 *lq510 = (gx_device_printer_lq510*)pdev;
+    int code = gdev_prn_get_params(pdev, plist);
+
+    assert(pdev->params_size == sizeof(gx_device_printer_lq510));
+
+    if (code < 0 || (code = param_write_bool(plist, "Bidirectional", &lq510->bidirectional)) < 0)
+    {
+        return code;
+    }
+
+    return code;
+}
+
+static int
+lq510_put_params(gx_device *pdev, gs_param_list *plist)
+{
+    gx_device_printer_lq510 *lq510 = (gx_device_printer_lq510*)pdev;
+    int code = 0;
+    int ecode = 0;
+    const char *param_name;
+    bool bidirectional = lq510->bidirectional;
+
+    assert(pdev->params_size == sizeof(gx_device_printer_lq510));
+
+    switch (code = param_read_bool(plist, (param_name = "Bidirectional"), &bidirectional)) {
+    default:
+        ecode = code;
+        param_signal_error(plist, param_name, ecode);
+    case 0:
+    case 1:
+        break;
+    }
+
+    if (ecode < 0)
+        return ecode;
+
+    code = gdev_prn_put_params(pdev, plist);
+    if (code < 0)
+        return code;
+
+    lq510->bidirectional = bidirectional;
+
+    return code;
 }
