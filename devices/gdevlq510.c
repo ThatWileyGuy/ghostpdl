@@ -81,6 +81,9 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         return_error(gs_error_VMerror);
     }
 
+    assert(xres == 180 || xres == 360);
+    assert(yres == 180 || yres == 360);
+
     /* Initialize the printer and reset the margins. */
     fwrite(init_string, init_len - 1, sizeof(char), prn_stream);
     fputc((int)(pdev->width / pdev->x_pixels_per_inch * 10) + 2,
@@ -211,23 +214,31 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         {
             // We can't actually put the printhead at a negative position.
             // Instead, fiddle the buffers so it looks like it is.
-            const int shift = -1 * ((lnum - 1) / 2);
-
             assert(printer_lnum == 0);
+
+            if (lnum % 2 != 0)
+            {
+                dot24_skip_lines(1, y_high, prn_stream);
+                printer_lnum = 1;
+            }
+
+            assert((printer_lnum - lnum) % 2 == 0);
             assert(y_high);
-            assert(shift >= 0);
 
             for (int real_line = 0; real_line < 24; real_line++)
             {
-                const int remapped_line = real_line + shift;
-                if (remapped_line < 24)
+                const int document_line = lnum + real_line * 2;
+                const int printhead_line = (document_line - printer_lnum) / 2;
+
+                assert((document_line - printer_lnum) % 2 == 0);
+                assert(printhead_line < real_line);
+
+                if (printhead_line >= 0 && printhead_line < 24)
                 {
-                    memcpy(in + real_line * line_size, in + remapped_line * line_size, line_size);
+                    memcpy(in + (printhead_line * line_size), in + (real_line * line_size), line_size);
                 }
-                else
-                {
-                    memset(in + real_line * line_size, 0, line_size);
-                }
+
+                memset(in + (real_line * line_size), 0, line_size);
             }
         }
         else if (printer_lnum != lnum)
