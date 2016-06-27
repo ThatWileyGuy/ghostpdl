@@ -35,7 +35,7 @@ gx_device_printer_lq510 gs_lq510_device =
     prn_device_std_body(gx_device_printer_lq510, prn_lq510_procs, "lq510",
     DEFAULT_WIDTH_10THS, DEFAULT_HEIGHT_10THS,
     360, 360,
-    0.25, 0.02, 0.25, 0.4,	/* margins */
+    0.12, 0.53, 0.12, 0.33,	/* margins - left, bottom, right, top */
     1, lq510_print_page),
     false
 };
@@ -311,7 +311,7 @@ void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream)
         if (lines >> 1)
             fprintf(prn_stream, "\x1bJ%c", lines >> 1);
         if (lines & 1)
-            fputc('\n', prn_stream);
+            fprintf(prn_stream, "\x1b+%c\n\x1b+%c", 1, 0);
     }
 }
 
@@ -599,7 +599,7 @@ static int
 lq510_print_page(gx_device_printer *pdev, FILE *prn_stream)
 {
     bool bidirectional = ((gx_device_printer_lq510*)pdev)->bidirectional;
-    char lq510_init_string[] = "\033@\033P\033l\000\r\033\053\001\033U\000\033Q";
+    char lq510_init_string[] = "\033@\033P\033l\000\r\033\053\000\033U\000\033Q";
 
     assert(pdev->params_size == sizeof(gx_device_printer_lq510));
     assert(lq510_init_string[12] == 'U');
