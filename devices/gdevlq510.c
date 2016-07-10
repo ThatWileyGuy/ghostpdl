@@ -44,7 +44,7 @@ gx_device_printer_lq510 gs_lq510_device =
 
 /* Forward references */
 static void dot24_output_run(byte *, int, int, FILE *);
-static void dot24_filter_bitmap(byte *data, byte *out, int count, int pass);
+static void dot24_filter_bitmap(byte *data, byte *out, int count);
 static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream);
 static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream);
 static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream);
@@ -89,15 +89,54 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     fputc((int)(pdev->width / pdev->x_pixels_per_inch * 10) + 2,
         prn_stream);
 
-    if (y_high)
+    // We have a couple of different strategies for printing depending on the resolution.
+    // These are intended to distribute lines between the top and bottom lines of the
+    // printhead, make sure the printhead isn't moving back and forth across the same
+    // pixels repeatedly and thus making obvious smear marks, and generally produce uniform
+    // output.
+
+    if (x_high && y_high)
     {
-        // For our 360dpi-vertical printing strategy to work, the first 12 printhead lines
-        // must always be 0 in the first pass. We'll print the lower 12 printhead
-        // lines, though.
-        // Here's how the strategy works in terms of rendered lines:
+        // 360x360 strategy:
+        // Post-seek case:
+        //     - 0-35 - empty
+        //     - 36-47 (evens) - printing "odd" dots
+        //     - 36-47 (odds) - will print next time
+        // Normal case:
+        //     - 0-11 (evens) - printing "even" dots
+        //     - 0-11 (odds) - done
+        //     - 12-23 (evens) - printing "even" dots
+        //     - 12-23 (odds) - "odd" dots printed
+        //     - 24-35 (evens) - printing "odd" dots
+        //     - 24-35 (odds) - "odd" dots printed
+        //     - 36-47 (evens) - printing "odd" dots
+        //     - 36-47 (odds) - printing next time
+        //
+        // Note that this is simplified - things are a bit more complicated because
+        // we alternate between advancing 11 lines and advancing 13 lines.
+
+        lnum = -36;
+    }
+    else if (x_high)
+    {
+        // 360x180 strategy:
+        // Post-seek case:
+        //     - 0-11 - empty
+        //     - 12-23 - printing "odd" dots
+        // Normal case:
+        //     - 0-11 - printing "even" dots
+        //     - 12-23 - printing "odd" dots
+        //
+        // We advance 12 lines every time.
+
+        lnum = -12;
+    }
+    else if (y_high)
+    {
+        // 180x360 strategy:
         // Post-seek case:
         //     - 0-22 (evens) - empty
-        //     - 1-23 (odds) - printed last time or empty
+        //     - 1-23 (odds) - empty
         //     - 24-47 (evens) - printing
         //     - 24-47 (odds) - printed next time
         // Normal case:
@@ -106,29 +145,22 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         //     - 24-46 (evens) - printing
         //     - 25-47 (odds) - will print next time
         //
-        // The benefit of this scheme is that for any block of 48 lines, the
-        // upper 12 even lines will be printed using the top of the printhead,
-        // the upper 12 odd lines were already printed using the bottom of the
-        // printhead, the lower 12 even lines will be printed using the bottom
-        // of the printhead, and the lower 12 odd lines will be printed in the
-        // next pass using the top of the printhead.
-        // This means that rendered lines alternate between printing on the top
-        // or bottom half of the printhead, which should make them appear very
-        // uniform.
-        //
-        // In practice, this makes seeking tricky, but in the normal case we
-        // simply advance 25 rendered lines every time.
+        // We advance 25 lines every time.
 
         lnum = -24;
+    }
+    else
+    {
+        lnum = -12;
     }
 
     /* Print lines of graphics */
     while (lnum < pdev->height)
     {
-        byte *in_end;
-        byte *out_end;
-        byte *inp;
-        int lcnt;
+        byte *in_end = NULL;
+        byte *out_end = NULL;
+        byte *inp = NULL;
+        int lcnt = 0;
 
         memset(in, 0, in_size);
 
@@ -172,41 +204,41 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         // Seek if the block starts with empty lines
         if (in[0] == 0 && !memcmp((char *)in, (char *)in + 1, line_size - 1))
         {
-            int skip = 0;
-            skip = 1;
-            while (skip < 24 && !memcmp((char*)in, (char*)in + line_size * skip, line_size))
-            {
-                skip++;
-            }
+            int empty_lines = 0;
+            int empty_lines_needed = 0;
 
             if (!y_high)
             {
-                lnum += skip;
-                continue;
-            }
-            else if (skip >= 12)
-            {
-                // in 360dpi mode, we can only seek if all 12 upper printhead
-                // lines are empty
+                empty_lines = 1;
+                empty_lines_needed = (x_high ? 12 : 12);
 
-                // check the lower even and odd lines until we find one that's non-zero
-                int high_skip = 0;
-                for (high_skip = 0; high_skip < 24; high_skip++)
+                while (empty_lines < 24 && !memcmp((char*)in, (char*)in + line_size * empty_lines, line_size))
+                {
+                    empty_lines++;
+                }
+            }
+            else
+            {
+                empty_lines_needed = (x_high ? 36 : 24);
+
+                for (empty_lines = 0; empty_lines < 48; empty_lines++)
                 {
                     // we put the odd lines in the bottom half of the input buffer, so we need some
                     // contortions to iterate through them here
-                    const char* target_line = (const char*)(in + (line_size * (12 + (high_skip / 2) + (high_skip % 2 == 0 ? 0 : 24))));
+                    const char* target_line = (const char*)(in + (line_size * ((empty_lines / 2) + (empty_lines % 2 == 0 ? 0 : 24))));
                     if (memcmp((char*)in, target_line, line_size))
                     {
                         break;
                     }
-                }
 
-                if (high_skip != 0)
-                {
-                    lnum += high_skip;
-                    continue;
+                    assert(empty_lines != 0 || (byte*)target_line == (byte*)in);
                 }
+            }
+
+            if (empty_lines > empty_lines_needed)
+            {
+                lnum += (empty_lines - empty_lines_needed);
+                continue;
             }
         }
 
@@ -223,7 +255,6 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
             }
 
             assert((printer_lnum - lnum) % 2 == 0);
-            assert(y_high);
 
             for (int real_line = 0; real_line < 24; real_line++)
             {
@@ -276,7 +307,22 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
             forward = !forward;
         }
 
-        lnum += y_high ? 25 : 24;
+        if (x_high && y_high)
+        {
+            lnum += (lnum % 2 == 0 ? 11 : 13);
+        }
+        else if (x_high)
+        {
+            lnum += 12;
+        }
+        else if (y_high)
+        {
+            lnum += 25;
+        }
+        else
+        {
+            lnum += 12;
+        }
     }
 
     /* Eject the page and reinitialize the printer */
@@ -468,86 +514,82 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, b
 
 void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream)
 {
-    int passes = x_high ? 2 : 1;
     byte * const orig_blk_start = blk_start;
     byte *seg_start;
     byte *seg_end;
     int seg_pos;
 
-    for (int pass = 0; pass < passes; pass++)
-    {
-        blk_start = orig_blk_start;
+    blk_start = orig_blk_start;
 
-        for (; blk_start < blk_end;)
+    for (; blk_start < blk_end;)
+    {
+        for (seg_start = blk_start; seg_start < blk_end; seg_start += bytes_per_pos)
         {
-            for (seg_start = blk_start; seg_start < blk_end; seg_start += bytes_per_pos)
+            bool zero = true;
+            for (int i = 0; i < bytes_per_pos && seg_start + i < blk_end; i++)
             {
-                bool zero = true;
-                for (int i = 0; i < bytes_per_pos && seg_start + i < blk_end; i++)
+                if (seg_start[i] != 0)
                 {
-                    if (seg_start[i] != 0)
-                    {
-                        zero = false;
-                        break;
-                    }
-                }
-                if (!zero)
-                {
+                    zero = false;
                     break;
                 }
             }
-
-            if (seg_start >= blk_end)
+            if (!zero)
             {
-                // done!
                 break;
             }
+        }
 
-            for (seg_end = seg_start; seg_end < blk_end; seg_end += bytes_per_pos)
+        if (seg_start >= blk_end)
+        {
+            // done!
+            break;
+        }
+
+        for (seg_end = seg_start; seg_end < blk_end; seg_end += bytes_per_pos)
+        {
+            bool zero = true;
+            for (int i = 0; i < bytes_per_pos && seg_end + i < blk_end; i++)
             {
-                bool zero = true;
-                for (int i = 0; i < bytes_per_pos && seg_end + i < blk_end; i++)
+                if (seg_end[i] != 0)
                 {
-                    if (seg_end[i] != 0)
-                    {
-                        zero = false;
-                        break;
-                    }
-                }
-                if (zero)
-                {
+                    zero = false;
                     break;
                 }
             }
-
-            if (seg_end >= blk_end)
+            if (zero)
             {
-                seg_end = blk_end;
+                break;
             }
-
-            assert(seg_start != seg_end);
-
-            if (x_high)
-            {
-                dot24_filter_bitmap(seg_start, out_temp, seg_end - seg_start, pass);
-            }
-            else
-            {
-                memcpy(out_temp, seg_start, seg_end - seg_start);
-            }
-
-            // go to the start of the segment
-            seg_pos = pos + (seg_start - orig_blk_start) / bytes_per_pos;
-            fprintf(prn_stream, "\033$%c%c", seg_pos % 256, seg_pos / 256);
-
-            // print
-            dot24_output_run(out_temp, seg_end - seg_start, x_high, prn_stream);
-
-            blk_start = seg_end;
         }
 
-        fputc('\r', prn_stream);
+        if (seg_end >= blk_end)
+        {
+            seg_end = blk_end;
+        }
+
+        assert(seg_start != seg_end);
+
+        if (x_high)
+        {
+            dot24_filter_bitmap(seg_start, out_temp, seg_end - seg_start);
+        }
+        else
+        {
+            memcpy(out_temp, seg_start, seg_end - seg_start);
+        }
+
+        // go to the start of the segment
+        seg_pos = pos + (seg_start - orig_blk_start) / bytes_per_pos;
+        fprintf(prn_stream, "\033$%c%c", seg_pos % 256, seg_pos / 256);
+
+        // print
+        dot24_output_run(out_temp, seg_end - seg_start, x_high, prn_stream);
+
+        blk_start = seg_end;
     }
+
+    fputc('\r', prn_stream);
 }
 
 /* Output a single graphics command. */
@@ -577,21 +619,19 @@ dot24_output_run(byte *data, int count, bool x_high, FILE *prn_stream)
 }
 
 static void
-dot24_filter_bitmap(byte *data, byte *out, int count, int pass)
+dot24_filter_bitmap(byte *data, byte *out, int count)
 {
-    int i;
-    byte mask = 0xAA;
+    byte mask[] = { 0x55, 0x5A, 0xAA };
 
-    if (pass)
-        mask = ~mask;
+    assert(count % 3 == 0);
 
-    for (i = 0; i < count; i += 3)
+    for (int i = 0; i < count; i += 3)
     {
-        out[i + 0] = data[i + 0] & mask;
-        out[i + 1] = data[i + 1] & mask;
-        out[i + 2] = data[i + 2] & mask;
-
-        mask = ~mask;
+        for (int j = 0; j < 3; j++)
+        {
+            out[i + j] = data[i + j] & mask[j];
+            mask[j] = ~mask[j];
+        }
     }
 }
 
