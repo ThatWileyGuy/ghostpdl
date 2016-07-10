@@ -401,7 +401,8 @@ void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high,
         for (blk_end = blk_start + bytes_per_pos; blk_end < in_end; blk_end += bytes_per_pos)
         {
             bool zero = true;
-            for (int i = 0; i < (xres * 3) / 2 && blk_end + i < in_end; i++)
+            const int blk_gap_len = (xres * 3) / 2; // xres is the DPI and there are 3 bytes per column (24 pins)
+            for (int i = 0; i < blk_gap_len && blk_end + i < in_end; i++)
             {
                 if (blk_end[i] != 0)
                 {
@@ -485,7 +486,8 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, b
         for (; blk_start >= in_start; blk_start -= bytes_per_pos)
         {
             bool zero = true;
-            for (int i = -1; i >= -((xres * 3) / 2) && blk_start + i >= in_start; i--)
+            const int blk_gap_len = (xres * 3) / 2; // xres is the DPI and there are 3 bytes per column (24 pins)
+            for (int i = -1; i >= -blk_gap_len && blk_start + i >= in_start; i--)
             {
                 if (blk_start[i] != 0)
                 {
@@ -514,19 +516,22 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, b
 
 void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream)
 {
-    byte * const orig_blk_start = blk_start;
-    byte *seg_start;
-    byte *seg_end;
-    int seg_pos;
+    byte *seg_start = NULL;
+    byte *seg_end = NULL;
+    int seg_rel_pos = 0;
+    const int bytes_per_rel_pos = bytes_per_pos / 3;
 
-    blk_start = orig_blk_start;
+    assert(bytes_per_rel_pos % 3 == 0);
+
+    // we're going to be using relative seeks inside the loop, so start out with an absolute seek to the start of the block
+    fprintf(prn_stream, "\033$%c%c", pos % 256, pos / 256);
 
     for (; blk_start < blk_end;)
     {
-        for (seg_start = blk_start; seg_start < blk_end; seg_start += bytes_per_pos)
+        for (seg_start = blk_start; seg_start < blk_end; seg_start += bytes_per_rel_pos)
         {
             bool zero = true;
-            for (int i = 0; i < bytes_per_pos && seg_start + i < blk_end; i++)
+            for (int i = 0; i < bytes_per_rel_pos && seg_start + i < blk_end; i++)
             {
                 if (seg_start[i] != 0)
                 {
@@ -546,10 +551,10 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
             break;
         }
 
-        for (seg_end = seg_start; seg_end < blk_end; seg_end += bytes_per_pos)
+        for (seg_end = seg_start; seg_end < blk_end; seg_end += bytes_per_rel_pos)
         {
             bool zero = true;
-            for (int i = 0; i < bytes_per_pos && seg_end + i < blk_end; i++)
+            for (int i = 0; i < bytes_per_rel_pos && seg_end + i < blk_end; i++)
             {
                 if (seg_end[i] != 0)
                 {
@@ -580,8 +585,13 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
         }
 
         // go to the start of the segment
-        seg_pos = pos + (seg_start - orig_blk_start) / bytes_per_pos;
-        fprintf(prn_stream, "\033$%c%c", seg_pos % 256, seg_pos / 256);
+        seg_rel_pos = (seg_start - blk_start) / bytes_per_rel_pos;
+        assert((seg_start - blk_start) % bytes_per_rel_pos == 0);
+
+        if (seg_rel_pos != 0)
+        {
+            fprintf(prn_stream, "\033\\%c%c", seg_rel_pos % 256, seg_rel_pos / 256);
+        }
 
         // print
         dot24_output_run(out_temp, seg_end - seg_start, x_high, prn_stream);
@@ -596,14 +606,7 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
 static void
 dot24_output_run(byte *data, int count, bool x_high, FILE *prn_stream)
 {
-    int xcount;
-
-    while (count > 3 && data[count - 1] == 0 && data[count - 2] == 0 && data[count - 3] == 0)
-    {
-        count -= 3;
-    }
-
-    xcount = count / 3;
+    int xcount = count / 3;
 
     if (count == 0)
     {
@@ -639,7 +642,7 @@ static int
 lq510_print_page(gx_device_printer *pdev, FILE *prn_stream)
 {
     bool bidirectional = ((gx_device_printer_lq510*)pdev)->bidirectional;
-    char lq510_init_string[] = "\033@\033P\033l\000\r\033\053\000\033U\000\033Q";
+    char lq510_init_string[] = "\033@\033P\033l\000\r\033\053\000\033U\000\033x\001\033Q";
 
     assert(pdev->params_size == sizeof(gx_device_printer_lq510));
     assert(lq510_init_string[12] == 'U');
