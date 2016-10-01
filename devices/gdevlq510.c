@@ -43,11 +43,11 @@ gx_device_printer_lq510 gs_lq510_device =
 /* ------ Internal routines ------ */
 
 /* Forward references */
-static void dot24_output_run(byte *, int, int, FILE *);
-static void dot24_filter_bitmap(byte *data, byte *out, int count);
-static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream);
+static void dot24_output_run(byte *data, int count, FILE *prn_stream);
+static void dot24_filter_bitmap(byte *data, byte *out, int count, int *output_count, bool print_even_dots);
+static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream);
+static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, bool print_even_dots, int bytes_per_pos, FILE *prn_stream);
 static void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream);
 
 /* Send the page to the printer. */
@@ -67,10 +67,11 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     const int dots_per_pos = xres / 60;
     const int bytes_per_pos = dots_per_pos * 3;
     int lnum = 0, printer_lnum = 0;
+    int cycle = 0;
     bool forward = true;
 
     /* Check allocations */
-    if (in == 0 || out == 0)
+    if (in == 0 || out == 0 || out_temp == 0)
     {
         if (out_temp)
             gs_free(pdev->memory, (char *)out_temp, out_size, 1, "dot24_print_page (out_temp)");
@@ -103,17 +104,17 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         //     - 36-47 (evens) - printing "odd" dots
         //     - 36-47 (odds) - will print next time
         // Normal case:
-        //     - 0-11 (evens) - printing "even" dots
+        //     - 0-11 (evens) - printing one set of dots
         //     - 0-11 (odds) - done
-        //     - 12-23 (evens) - printing "even" dots
-        //     - 12-23 (odds) - "odd" dots printed
-        //     - 24-35 (evens) - printing "odd" dots
-        //     - 24-35 (odds) - "odd" dots printed
-        //     - 36-47 (evens) - printing "odd" dots
+        //     - 12-23 (evens) - printing one set of dots
+        //     - 12-23 (odds) - one set of dots printed
+        //     - 24-35 (evens) - printing one set of dots
+        //     - 24-35 (odds) - one set of dots printed
+        //     - 36-47 (evens) - printing one set of dots
         //     - 36-47 (odds) - printing next time
         //
-        // Note that this is simplified - things are a bit more complicated because
-        // we alternate between advancing 11 lines and advancing 13 lines.
+        // We alternate between advancing 11 and 13 lines,
+        // and we also print "even" dots for two cycles, then print "odd" dots for two cycles.
 
         lnum = -36;
     }
@@ -194,11 +195,16 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         }
         else
         {
-            lcnt = gdev_prn_copy_scan_lines(pdev, lnum, in, line_size * 24);
-            if (lcnt < 24)
+            inp = in;
+            for (lcnt = 0; lcnt < 24; lcnt++, inp += line_size)
             {
-                memset(in + lcnt * line_size, 0, (24 - lcnt) * line_size);
+                const int line = lnum + lcnt;
+                if (line < 0 || !gdev_prn_copy_scan_lines(pdev, line, inp, line_size))
+                {
+                    memset(inp, 0, line_size);
+                }
             }
+            assert(inp == in + in_size);
         }
 
         // Seek if the block starts with empty lines
@@ -242,16 +248,16 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
             }
         }
 
-        if (lnum < 0)
+        if (lnum < 0 || lnum < printer_lnum)
         {
             // We can't actually put the printhead at a negative position.
             // Instead, fiddle the buffers so it looks like it is.
-            assert(printer_lnum == 0);
+            assert(printer_lnum < 4);
 
-            if (lnum % 2 != 0)
+            if (lnum % 2 != printer_lnum % 2)
             {
                 dot24_skip_lines(1, y_high, prn_stream);
-                printer_lnum = 1;
+                printer_lnum++;
             }
 
             assert((printer_lnum - lnum) % 2 == 0);
@@ -267,9 +273,11 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
                 if (printhead_line >= 0 && printhead_line < 24)
                 {
                     memcpy(in + (printhead_line * line_size), in + (real_line * line_size), line_size);
+                    assert(printhead_line * line_size + line_size <= in_size);
                 }
 
                 memset(in + (real_line * line_size), 0, line_size);
+                assert(real_line * line_size + line_size <= in_size);
             }
         }
         else if (printer_lnum != lnum)
@@ -295,11 +303,11 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
 
         if (forward)
         {
-            dot24_print_line(out_temp, out, out_end, x_high, y_high, xres, bytes_per_pos, prn_stream);
+            dot24_print_line(out_temp, out, out_end, x_high, y_high, !x_high || cycle < 2, xres, bytes_per_pos, prn_stream);
         }
         else
         {
-            dot24_print_line_backwards(out_temp, out, out_end, x_high, y_high, xres, bytes_per_pos, prn_stream);
+            dot24_print_line_backwards(out_temp, out, out_end, x_high, y_high, !x_high || cycle < 2, xres, bytes_per_pos, prn_stream);
         }
 
         if (bidirectional)
@@ -323,6 +331,8 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
         {
             lnum += 12;
         }
+
+        cycle = (cycle + 1) % 4;
     }
 
     /* Eject the page and reinitialize the printer */
@@ -361,7 +371,7 @@ void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream)
     }
 }
 
-void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -423,13 +433,13 @@ void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high,
 
         assert((blk_start - orig_in) % bytes_per_pos == 0);
 
-        dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
+        dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, print_even_dots, bytes_per_pos, prn_stream);
 
         in_start = blk_end;
     }
 }
 
-void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -508,23 +518,46 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, b
 
         assert((blk_start - orig_in) % bytes_per_pos == 0);
 
-        dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, bytes_per_pos, prn_stream);
+        dot24_print_block(out_temp, (blk_start - orig_in) / bytes_per_pos, blk_start, blk_end, x_high, print_even_dots, bytes_per_pos, prn_stream);
 
         in_end = blk_start;
     }
 }
 
-void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, bool print_even_dots, int bytes_per_pos, FILE *prn_stream)
 {
     byte *seg_start = NULL;
     byte *seg_end = NULL;
     int seg_rel_pos = 0;
-    const int bytes_per_rel_pos = bytes_per_pos / 3;
+    const int bytes_per_rel_pos = (bytes_per_pos / 3) / (x_high ? 2 : 1);
 
-    assert(bytes_per_rel_pos % 3 == 0);
+    assert(bytes_per_rel_pos == 3);
 
     // we're going to be using relative seeks inside the loop, so start out with an absolute seek to the start of the block
     fprintf(prn_stream, "\033$%c%c", pos % 256, pos / 256);
+
+    if (!print_even_dots)
+    {
+        // skip 1/360 to get to dot 1
+        fprintf(prn_stream, "\x1b*\x28%c%c%c%c%c", 1, 0, 0, 0, 0);
+    }
+
+    // buffer up what we're supposed to be printing
+    if (x_high)
+    {
+        int count_to_print = 0;
+        dot24_filter_bitmap(blk_start, out_temp, blk_end - blk_start, &count_to_print, print_even_dots);
+
+        blk_start = out_temp;
+        blk_end = blk_start + count_to_print;
+    }
+    else
+    {
+        memcpy(out_temp, blk_start, blk_end - blk_start);
+        blk_end = out_temp + (blk_end - blk_start);
+        blk_start = out_temp;
+        
+    }
 
     for (; blk_start < blk_end;)
     {
@@ -554,7 +587,9 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
         for (seg_end = seg_start; seg_end < blk_end; seg_end += bytes_per_rel_pos)
         {
             bool zero = true;
-            for (int i = 0; i < bytes_per_rel_pos && seg_end + i < blk_end; i++)
+            const int seg_gap_len = 4;
+
+            for (int i = 0; i < bytes_per_rel_pos * seg_gap_len && seg_end + i < blk_end; i++)
             {
                 if (seg_end[i] != 0)
                 {
@@ -575,15 +610,6 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
 
         assert(seg_start != seg_end);
 
-        if (x_high)
-        {
-            dot24_filter_bitmap(seg_start, out_temp, seg_end - seg_start);
-        }
-        else
-        {
-            memcpy(out_temp, seg_start, seg_end - seg_start);
-        }
-
         // go to the start of the segment
         seg_rel_pos = (seg_start - blk_start) / bytes_per_rel_pos;
         assert((seg_start - blk_start) % bytes_per_rel_pos == 0);
@@ -594,7 +620,7 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
         }
 
         // print
-        dot24_output_run(out_temp, seg_end - seg_start, x_high, prn_stream);
+        dot24_output_run(seg_start, seg_end - seg_start, prn_stream);
 
         blk_start = seg_end;
     }
@@ -604,7 +630,7 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
 
 /* Output a single graphics command. */
 static void
-dot24_output_run(byte *data, int count, bool x_high, FILE *prn_stream)
+dot24_output_run(byte *data, int count, FILE *prn_stream)
 {
     int xcount = count / 3;
 
@@ -615,27 +641,28 @@ dot24_output_run(byte *data, int count, bool x_high, FILE *prn_stream)
 
     fputc(033, prn_stream);
     fputc('*', prn_stream);
-    fputc((x_high ? 40 : 39), prn_stream);
+    fputc(39, prn_stream);
     fputc(xcount & 0xff, prn_stream);
     fputc(xcount >> 8, prn_stream);
     fwrite(data, 1, count, prn_stream);
 }
 
 static void
-dot24_filter_bitmap(byte *data, byte *out, int count)
+dot24_filter_bitmap(byte *data, byte *out, int count, int *output_count, bool print_even_dots)
 {
-    byte mask[] = { 0x55, 0x5A, 0xAA };
-
+    int i = 0;
+    int count_to_print = 0;
     assert(count % 3 == 0);
 
-    for (int i = 0; i < count; i += 3)
+    for (i = (print_even_dots ? 0 : 3); i < count; i += 6)
     {
-        for (int j = 0; j < 3; j++)
-        {
-            out[i + j] = data[i + j] & mask[j];
-            mask[j] = ~mask[j];
-        }
+        out[(i / 6) * 3 + 0] = data[i + 0];
+        out[(i / 6) * 3 + 1] = data[i + 1];
+        out[(i / 6) * 3 + 2] = data[i + 2];
+        count_to_print += 3;
     }
+
+    *output_count = count_to_print;
 }
 
 static int
