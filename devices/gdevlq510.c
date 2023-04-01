@@ -28,11 +28,18 @@ typedef struct _gx_device_printer_lq510 {
     bool bidirectional;
 } gx_device_printer_lq510;
 
-const gx_device_procs prn_lq510_procs = prn_params_procs(gdev_prn_open, gdev_prn_bg_output_page, gdev_prn_close, lq510_get_params, lq510_put_params);
+static void
+lq510_initialize_device_procs(gx_device *dev)
+{
+    gdev_prn_initialize_device_procs_mono(dev);
+
+    set_dev_proc(dev, get_params, lq510_get_params);
+    set_dev_proc(dev, put_params, lq510_put_params);
+}
 
 gx_device_printer_lq510 gs_lq510_device =
 {
-    prn_device_std_body(gx_device_printer_lq510, prn_lq510_procs, "lq510",
+    prn_device_std_body(gx_device_printer_lq510, lq510_initialize_device_procs, "lq510",
     DEFAULT_WIDTH_10THS, DEFAULT_HEIGHT_10THS,
     360, 360,
     0.12, 0.53, 0.12, 0.33,	/* margins - left, bottom, right, top */
@@ -43,16 +50,16 @@ gx_device_printer_lq510 gs_lq510_device =
 /* ------ Internal routines ------ */
 
 /* Forward references */
-static void dot24_output_run(byte *data, int count, FILE *prn_stream);
+static void dot24_output_run(byte *data, int count, gp_file *prn_stream);
 static void dot24_filter_bitmap(byte *data, byte *out, int count, int *output_count, bool print_even_dots);
-static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream);
-static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, bool print_even_dots, int bytes_per_pos, FILE *prn_stream);
-static void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream);
+static void dot24_print_line(byte *out_temp, byte *out, byte *out_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, gp_file *prn_stream);
+static void dot24_print_line_backwards(byte*out_temp, byte *out, byte *out_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, gp_file *prn_stream);
+static void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, bool print_even_dots, int bytes_per_pos, gp_file *prn_stream);
+static void dot24_skip_lines(int lines, bool y_high, gp_file *prn_stream);
 
 /* Send the page to the printer. */
 static int
-dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, int init_len, bool bidirectional)
+dot24_print_page(gx_device_printer *pdev, gp_file *prn_stream, char *init_string, int init_len, bool bidirectional)
 {
     const int xres = (int)pdev->x_pixels_per_inch;
     const int yres = (int)pdev->y_pixels_per_inch;
@@ -86,8 +93,8 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     assert(yres == 180 || yres == 360);
 
     /* Initialize the printer and reset the margins. */
-    fwrite(init_string, init_len - 1, sizeof(char), prn_stream);
-    fputc((int)(pdev->width / pdev->x_pixels_per_inch * 10) + 2,
+    gp_fwrite(init_string, init_len - 1, sizeof(char), prn_stream);
+    gp_fputc((int)(pdev->width / pdev->x_pixels_per_inch * 10) + 2,
         prn_stream);
 
     // We have a couple of different strategies for printing depending on the resolution.
@@ -336,8 +343,8 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     }
 
     /* Eject the page and reinitialize the printer */
-    fputs("\f\033@", prn_stream);
-    fflush(prn_stream);
+    gp_fputs("\f\033@", prn_stream);
+    gp_fflush(prn_stream);
 
     gs_free(pdev->memory, (char *)out_temp, out_size, 1, "dot24_print_page (out_temp)");
     gs_free(pdev->memory, (char *)out, out_size, 1, "dot24_print_page (out)");
@@ -346,7 +353,7 @@ dot24_print_page(gx_device_printer *pdev, FILE *prn_stream, char *init_string, i
     return 0;
 }
 
-void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream)
+void dot24_skip_lines(int lines, bool y_high, gp_file *prn_stream)
 {
     if (!y_high)
     {
@@ -358,20 +365,20 @@ void dot24_skip_lines(int lines, bool y_high, FILE *prn_stream)
     /* Vertical tab to the appropriate position. */
     while ((lines >> 1) > 255)
     {
-        fputs("\x1bJ\xff", prn_stream);
+        gp_fputs("\x1bJ\xff", prn_stream);
         lines -= 255 * 2;
     }
 
     if (lines)
     {
         if (lines >> 1)
-            fprintf(prn_stream, "\x1bJ%c", lines >> 1);
+            gp_fprintf(prn_stream, "\x1bJ%c", lines >> 1);
         if (lines & 1)
-            fprintf(prn_stream, "\x1b+%c\n\x1b+%c", 1, 0);
+            gp_fprintf(prn_stream, "\x1b+%c\n\x1b+%c", 1, 0);
     }
 }
 
-void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, gp_file *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -439,7 +446,7 @@ void dot24_print_line(byte *out_temp, byte *in_start, byte *in_end, bool x_high,
     }
 }
 
-void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, bool x_high, bool y_high, bool print_even_dots, int xres, int bytes_per_pos, gp_file *prn_stream)
 {
     const byte *orig_in = in_start;
     byte *blk_start;
@@ -524,7 +531,7 @@ void dot24_print_line_backwards(byte * out_temp, byte *in_start, byte *in_end, b
     }
 }
 
-void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, bool print_even_dots, int bytes_per_pos, FILE *prn_stream)
+void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, bool x_high, bool print_even_dots, int bytes_per_pos, gp_file *prn_stream)
 {
     byte *seg_start = NULL;
     byte *seg_end = NULL;
@@ -534,12 +541,12 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
     assert(bytes_per_rel_pos == 3);
 
     // we're going to be using relative seeks inside the loop, so start out with an absolute seek to the start of the block
-    fprintf(prn_stream, "\033$%c%c", pos % 256, pos / 256);
+    gp_fprintf(prn_stream, "\033$%c%c", pos % 256, pos / 256);
 
     if (!print_even_dots)
     {
         // skip 1/360 to get to dot 1
-        fprintf(prn_stream, "\x1b*\x28%c%c%c%c%c", 1, 0, 0, 0, 0);
+        gp_fprintf(prn_stream, "\x1b*\x28%c%c%c%c%c", 1, 0, 0, 0, 0);
     }
 
     // buffer up what we're supposed to be printing
@@ -616,7 +623,7 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
 
         if (seg_rel_pos != 0)
         {
-            fprintf(prn_stream, "\033\\%c%c", seg_rel_pos % 256, seg_rel_pos / 256);
+            gp_fprintf(prn_stream, "\033\\%c%c", seg_rel_pos % 256, seg_rel_pos / 256);
         }
 
         // print
@@ -625,12 +632,12 @@ void dot24_print_block(byte *out_temp, int pos, byte *blk_start, byte *blk_end, 
         blk_start = seg_end;
     }
 
-    fputc('\r', prn_stream);
+    gp_fputc('\r', prn_stream);
 }
 
 /* Output a single graphics command. */
 static void
-dot24_output_run(byte *data, int count, FILE *prn_stream)
+dot24_output_run(byte *data, int count, gp_file *prn_stream)
 {
     int xcount = count / 3;
 
@@ -639,12 +646,12 @@ dot24_output_run(byte *data, int count, FILE *prn_stream)
         return;
     }
 
-    fputc(033, prn_stream);
-    fputc('*', prn_stream);
-    fputc(39, prn_stream);
-    fputc(xcount & 0xff, prn_stream);
-    fputc(xcount >> 8, prn_stream);
-    fwrite(data, 1, count, prn_stream);
+    gp_fputc(033, prn_stream);
+    gp_fputc('*', prn_stream);
+    gp_fputc(39, prn_stream);
+    gp_fputc(xcount & 0xff, prn_stream);
+    gp_fputc(xcount >> 8, prn_stream);
+    gp_fwrite(data, 1, count, prn_stream);
 }
 
 static void
@@ -666,7 +673,7 @@ dot24_filter_bitmap(byte *data, byte *out, int count, int *output_count, bool pr
 }
 
 static int
-lq510_print_page(gx_device_printer *pdev, FILE *prn_stream)
+lq510_print_page(gx_device_printer *pdev, gp_file *prn_stream)
 {
     bool bidirectional = ((gx_device_printer_lq510*)pdev)->bidirectional;
     char lq510_init_string[] = "\033@\033P\033l\000\r\033\053\000\033U\000\033x\001\033Q";
